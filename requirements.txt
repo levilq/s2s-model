@@ -1,0 +1,4 @@
+landlab
+numpy
+matplotlib
+rasterio

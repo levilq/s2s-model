@@ -1,0 +1,30 @@
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore compiled files
+*.class
+*.o
+*.so
+*.out
+
+# Ignore logs and temp files
+logs/
+*.log
+*.tmp
+
+# Ignore Python files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore large data files
+data/raw/
+data/GPCP_3.2/
+
+
+# Ignore VS Code settings
+.vscode/
