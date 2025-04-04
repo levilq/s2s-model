@@ -20,7 +20,7 @@ def preprocess_precipitation(precip):
     return precip
 
 if __name__ == "__main__":
-    precip_path = os.path.join(DATA_DIR, 'precipitation.tif')  # Adjust filename as needed
+    precip_path = os.path.join(DATA_DIR, 'precip1000m.tif')  # Adjust filename as needed
     precip, bounds, (dx, dy) = load_precipitation(precip_path)
     print(f"Precipitation loaded. Shape: {precip.shape}, Resolution: ({dx}, {dy})")
 
