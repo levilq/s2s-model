@@ -1,5 +1,3 @@
-# src/modeling/hydrology.py (from my last response)
-
 import os
 import numpy as np
 import matplotlib.pyplot as plt
