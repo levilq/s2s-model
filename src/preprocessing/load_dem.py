@@ -70,52 +70,39 @@ def create_landlab_grid(elevation, dx, dy, nodata, watershed_mask=None):
     # Set no-data nodes to closed
     grid.set_nodata_nodes_to_closed(grid.at_node['topographic__elevation'], 0.0)
 
-    # Set valid nodes (inside the watershed) to core nodes
-    flat_nodata_mask = nodata_mask.ravel()
-    grid.status_at_node[flat_nodata_mask] = grid.BC_NODE_IS_CLOSED
-    grid.status_at_node[~flat_nodata_mask] = grid.BC_NODE_IS_CORE
-
     # Ensure perimeter nodes of the entire grid are closed
-    grid.set_closed_boundaries_at_grid_edges(True, True, True, True)
-
-    # Define outlet nodes
-    seepage_outlet_node = 60 * cols + 149  # Just before the dam
-    overflow_outlet_node = 60 * cols + 150  # On the dam crest
-
-    if flat_nodata_mask[seepage_outlet_node]:
-        print("Warning: Seepage outlet node is in a no-data area.")
-    else:
-        grid.status_at_node[seepage_outlet_node] = grid.BC_NODE_IS_FIXED_VALUE
-
-    if flat_nodata_mask[overflow_outlet_node]:
-        print("Warning: Overflow outlet node is in a no-data area.")
-    else:
-        grid.status_at_node[overflow_outlet_node] = grid.BC_NODE_IS_CLOSED  # Initially closed
-
-    # Debug: Print boundary conditions
-    print(f"Number of closed nodes: {np.sum(grid.status_at_node == grid.BC_NODE_IS_CLOSED)}")
-    print(f"Number of core nodes: {np.sum(grid.status_at_node == grid.BC_NODE_IS_CORE)}")
-    print(f"Number of fixed value (open) nodes: {np.sum(grid.status_at_node == grid.BC_NODE_IS_FIXED_VALUE)}")
+    grid.set_watershed_boundary_condition(grid.field_values('topographic__elevation'), nodata_value=0.0)
+    
+    #TODO: When the model is running well, add one more outlet for the seepage and close the other one until the lake level reaches the dam crest.
 
     end_time = time.time()
-    print(f"Time to create grid: {end_time - start_time:.2f} seconds")
+    print(f"Time to create grid: {end_time - start_time:.2f} seconds") 
     return grid, nodata_mask
 
 
-def plot_dem(grid):
+def plot_grid(grid:RasterModelGrid, field_to_plot:str, title:str="Model topography", cmap:str='terrain'):
     """Display the DEM plot without saving."""
-    print("Starting to plot DEM...")
     start_time = time.time()
     plt.figure(figsize=(10, 8))
-    plt.imshow(grid.at_node['topographic__elevation'].reshape(grid.shape), cmap='terrain')
+
+    match field_to_plot:
+        case 'status_at_node':
+            plt.imshow(grid.status_at_node.reshape(grid.shape), cmap='viridis')
+            plt.colorbar(label='Node Status')
+        case 'topographic__elevation':
+            plt.imshow(grid.at_node['topographic__elevation'].reshape(grid.shape), cmap=cmap)
+            plt.colorbar(label='Elevation (m)')
+        case _:
+            raise ValueError(f"Unknown field to plot: {field_to_plot}")
     plt.colorbar(label='Elevation (m)')
-    plt.title('Sarez Lake DEM')
+    plt.title(title)
     plt.show()
     end_time = time.time()
     print(f"Time to display DEM: {end_time - start_time:.2f} seconds")
 
 
 if __name__ == "__main__":
+       
     dem_path = os.path.join(DATA_DIR, 'sarez1000m.tif')
     mask_path = os.path.join(DATA_DIR, 'sarez_watershed_mask.tif') if os.path.exists(
         os.path.join(DATA_DIR, 'sarez_watershed_mask.tif')) else None
@@ -128,4 +115,5 @@ if __name__ == "__main__":
     grid, nodata_mask = create_landlab_grid(elevation, dx, dy, nodata, watershed_mask)
     print(f"Landlab grid created with {grid.number_of_nodes} nodes.")
 
-    plot_dem(grid)
+
+    plot_grid(grid, 'status_at_node', title="Node statuses")
