@@ -1,5 +1,3 @@
-# src/preprocessing/load_dem.py (from my last response)
-
 import os
 import time
 import numpy as np
@@ -14,7 +12,6 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
 RESULTS_DIR = os.path.join(BASE_DIR, 'results', 'figures')
 os.makedirs(RESULTS_DIR, exist_ok=True)
-
 
 def load_dem(dem_path, mask_path=None):
     """Load DEM data and optionally a watershed mask from .tif files."""
@@ -41,7 +38,6 @@ def load_dem(dem_path, mask_path=None):
     end_time = time.time()
     print(f"Time to load DEM: {end_time - start_time:.2f} seconds")
     return elevation_filled, bounds, res, nodata, watershed_mask
-
 
 def create_landlab_grid(elevation, dx, dy, nodata, watershed_mask=None):
     """Create a Landlab grid from DEM data with two outlets (seepage and overflow)."""
@@ -70,15 +66,38 @@ def create_landlab_grid(elevation, dx, dy, nodata, watershed_mask=None):
     # Set no-data nodes to closed
     grid.set_nodata_nodes_to_closed(grid.at_node['topographic__elevation'], 0.0)
 
-    # Ensure perimeter nodes of the entire grid are closed
+    # Use set_watershed_boundary_condition to set the primary outlet (seepage)
     grid.set_watershed_boundary_condition(grid.field_values('topographic__elevation'), nodata_value=0.0)
-    
-    #TODO: When the model is running well, add one more outlet for the seepage and close the other one until the lake level reaches the dam crest.
+
+    # Find the outlet node identified by set_watershed_boundary_condition
+    outlet_node = np.where(grid.status_at_node == grid.BC_NODE_IS_FIXED_VALUE)[0]
+    if len(outlet_node) != 1:
+        print(f"Warning: Expected 1 outlet node, found {len(outlet_node)}")
+    else:
+        seepage_outlet_node = outlet_node[0]
+        seepage_row, seepage_col = divmod(seepage_outlet_node, cols)
+        print(f"Seepage outlet identified at (row={seepage_row}, col={seepage_col})")
+
+    # Set the overflow outlet near the dam crest (assuming it's close to the seepage outlet)
+    # For 1000m resolution, place it one node away from the seepage outlet
+    overflow_row, overflow_col = seepage_row, seepage_col + 1
+    if overflow_col >= cols:
+        overflow_row, overflow_col = seepage_row + 1, seepage_col
+    overflow_outlet_node = overflow_row * cols + overflow_col
+
+    if nodata_mask.flatten()[overflow_outlet_node]:
+        print("Warning: Overflow outlet node is in a no-data area.")
+    else:
+        grid.status_at_node[overflow_outlet_node] = grid.BC_NODE_IS_CLOSED  # Initially closed
+
+    # Debug: Print boundary conditions
+    print(f"Number of closed nodes: {np.sum(grid.status_at_node == grid.BC_NODE_IS_CLOSED)}")
+    print(f"Number of core nodes: {np.sum(grid.status_at_node == grid.BC_NODE_IS_CORE)}")
+    print(f"Number of fixed value (open) nodes: {np.sum(grid.status_at_node == grid.BC_NODE_IS_FIXED_VALUE)}")
 
     end_time = time.time()
-    print(f"Time to create grid: {end_time - start_time:.2f} seconds") 
-    return grid, nodata_mask
-
+    print(f"Time to create grid: {end_time - start_time:.2f} seconds")
+    return grid, nodata_mask, seepage_outlet_node, overflow_outlet_node
 
 def plot_grid(grid:RasterModelGrid, field_to_plot:str, title:str="Model topography", cmap:str='terrain'):
     """Display the DEM plot without saving."""
@@ -100,9 +119,7 @@ def plot_grid(grid:RasterModelGrid, field_to_plot:str, title:str="Model topograp
     end_time = time.time()
     print(f"Time to display DEM: {end_time - start_time:.2f} seconds")
 
-
 if __name__ == "__main__":
-       
     dem_path = os.path.join(DATA_DIR, 'sarez1000m.tif')
     mask_path = os.path.join(DATA_DIR, 'sarez_watershed_mask.tif') if os.path.exists(
         os.path.join(DATA_DIR, 'sarez_watershed_mask.tif')) else None
@@ -112,8 +129,7 @@ if __name__ == "__main__":
     elevation, bounds, (dx, dy), nodata, watershed_mask = load_dem(dem_path, mask_path)
     print(f"DEM loaded. Shape: {elevation.shape}, Resolution: ({dx}, {dy}), No-data value: {nodata}")
 
-    grid, nodata_mask = create_landlab_grid(elevation, dx, dy, nodata, watershed_mask)
+    grid, nodata_mask, _, _ = create_landlab_grid(elevation, dx, dy, nodata, watershed_mask)
     print(f"Landlab grid created with {grid.number_of_nodes} nodes.")
-
 
     plot_grid(grid, 'status_at_node', title="Node statuses")
