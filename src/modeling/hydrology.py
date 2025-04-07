@@ -1,4 +1,8 @@
+import sys
 import os
+path_to_package = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..','..'))
+sys.path.append(path_to_package)
+
 import numpy as np
 import matplotlib.pyplot as plt
 from landlab.components import FlowAccumulator, ErosionDeposition
@@ -15,8 +19,9 @@ def setup_landlab_model(grid):
     print("Setting up FlowAccumulator...")
     fa = FlowAccumulator(
         grid,
-        surface='topographic__elevation',
-        flow_director='D8'
+        depression_finder="DepressionFinderAndRouter",
+        flow_director='D8',
+        runoff_rate=2
     )
     fa.run_one_step()
     print("Flow accumulation completed.")
