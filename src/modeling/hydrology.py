@@ -68,6 +68,9 @@ def run_model(grid, fa, ed, seepage_outlet_node, overflow_outlet_node, years=10,
     total_erosion = 0.0
     total_deposition = 0.0
 
+    # Store initial elevation to calculate total elevation change for sediment influx map
+    initial_elevation = grid.at_node['topographic__elevation'].copy()
+
     for i in range(n_steps):
         # Store elevation at the start of the timestep
         elevation_before = grid.at_node['topographic__elevation'].copy()
@@ -112,20 +115,31 @@ def run_model(grid, fa, ed, seepage_outlet_node, overflow_outlet_node, years=10,
     print(f"Total cumulative erosion: {total_erosion:.2f} m")
     print(f"Total cumulative deposition: {total_deposition:.2f} m")
 
-def plot_results(grid, dx, dy, initial_elevation, nodata_mask):
-    """Display the flow accumulation and sediment flux maps within the watershed."""
+    # Calculate data for sediment influx and outflux maps
+    # Sediment influx: Total elevation change over the simulation
+    elevation_change_total = grid.at_node['topographic__elevation'] - initial_elevation
+
+    # Sediment outflux: Use the sediment__outflux field from ErosionDeposition (kg/s)
+    sediment_outflux = grid.at_node['sediment__outflux'].copy()
+
+    return elevation_change_total, sediment_outflux
+
+def plot_results(grid, dx, dy, initial_elevation, nodata_mask, elevation_change_total, sediment_outflux, seepage_outlet_node, years):
+    """Display the flow accumulation, erosion/deposition, and sediment influx/outflux maps within the watershed."""
     print("Preparing plots...")
     cell_area = dx * dy * (111000 ** 2)
     drainage_area_m2 = grid.at_node['drainage_area'] * cell_area
     drainage_area_m2 = drainage_area_m2.reshape(grid.shape)
     drainage_area_m2[nodata_mask] = np.nan
 
+    # Plot flow accumulation
     plt.figure(figsize=(10, 8))
     plt.imshow(drainage_area_m2, cmap='Blues', norm='log')
     plt.colorbar(label='Drainage Area (m²)')
-    plt.title(f'Sarez Lake Watershed Flow Accumulation ({int(dx)}m)')
+    plt.title(f'Sarez Lake Watershed Flow Accumulation ({int(dx * 111000)}m)')
     plt.show()
 
+    # Plot elevation change (erosion/deposition)
     elevation_change = grid.at_node['topographic__elevation'] - initial_elevation
     elevation_change = elevation_change.reshape(grid.shape)
     elevation_change[nodata_mask] = np.nan
@@ -133,19 +147,44 @@ def plot_results(grid, dx, dy, initial_elevation, nodata_mask):
     plt.figure(figsize=(10, 8))
     plt.imshow(elevation_change, cmap='RdBu_r', vmin=-1.0, vmax=1.0)  # Reversed colormap: erosion (negative) in red, deposition (positive) in blue
     plt.colorbar(label='Elevation Change (m)')
-    plt.title(f'Erosion (Red) and Deposition (Blue) After {years} Years ({int(dx)}m)')
+    plt.title(f'Erosion (Red) and Deposition (Blue) After {years} Years ({int(dx * 111000)}m)')
+    plt.show()
+
+    # Plot sediment influx map (erosion only)
+    elevation_change_total_2d = elevation_change_total.reshape(grid.shape)
+    elevation_change_total_2d[nodata_mask] = np.nan  # Mask no-data areas
+    influx_map = np.where(elevation_change_total_2d < 0, elevation_change_total_2d, np.nan)  # Show only erosion (negative changes)
+    plt.figure(figsize=(10, 8))
+    plt.imshow(influx_map, cmap='Reds_r', vmin=-1.0, vmax=0.0)  # Reds_r: more erosion = darker red
+    plt.colorbar(label='Erosion (m, negative = sediment influx)')
+    plt.title(f'Sediment Influx (Erosion) After {years} Years ({int(dx * 111000)}m)')
+    plt.show()
+
+    # Plot sediment outflux map (sediment__outflux field with seepage outlet highlighted)
+    sediment_outflux_2d = sediment_outflux.reshape(grid.shape)
+    sediment_outflux_2d[nodata_mask] = np.nan  # Mask no-data areas
+    rows, cols = grid.shape
+    seepage_row, seepage_col = divmod(seepage_outlet_node, cols)  # Convert node ID to 2D coordinates
+    plt.figure(figsize=(10, 8))
+    plt.imshow(sediment_outflux_2d, cmap='Blues', norm='log')  # Log scale due to small values
+    plt.colorbar(label='Sediment Outflux (kg/s)')
+    plt.scatter(seepage_col, seepage_row, color='red', s=100, label='Seepage Outlet', marker='x')
+    plt.legend()
+    plt.title(f'Sediment Outflux After {years} Years ({int(dx * 111000)}m, Seepage Outlet Highlighted)')
     plt.show()
 
     print("Plots complete.")
 
 if __name__ == "__main__":
     print("Starting process...")
-    dem_path = os.path.join(DATA_DIR, 'sarez1000m.tif')
+    dem_path = os.path.join(DATA_DIR, 'sarez500m.tif')
     mask_path = os.path.join(DATA_DIR, 'sarez_watershed_mask.tif') if os.path.exists(
         os.path.join(DATA_DIR, 'sarez_watershed_mask.tif')) else None
+    lake_mask_path = os.path.join(DATA_DIR, 'sarez_lake_mask.tif') if os.path.exists(
+        os.path.join(DATA_DIR, 'sarez_lake_mask.tif')) else None
 
     print("Loading DEM...")
-    elevation, bounds, (dx, dy), nodata, watershed_mask = load_dem(dem_path, mask_path)
+    elevation, bounds, (dx, dy), nodata, watershed_mask, lake_mask = load_dem(dem_path, mask_path, lake_mask_path)
     print("Creating Landlab grid...")
     grid, nodata_mask, seepage_outlet_node, overflow_outlet_node = create_landlab_grid(elevation, dx, dy, nodata, watershed_mask)
     print(f"Grid loaded with {grid.number_of_nodes} nodes.")
@@ -154,7 +193,7 @@ if __name__ == "__main__":
 
     grid, fa, ed = setup_landlab_model(grid)
 
-    years = 100  # Changed to 100 years as per your modification
-    run_model(grid, fa, ed, seepage_outlet_node, overflow_outlet_node, years=years, dt=0.1)
+    years = 100  # Using 100 years as per your working script
+    elevation_change_total, sediment_outflux = run_model(grid, fa, ed, seepage_outlet_node, overflow_outlet_node, years=years, dt=0.1)
 
-    plot_results(grid, dx, dy, initial_elevation, nodata_mask)
+    plot_results(grid, dx, dy, initial_elevation, nodata_mask, elevation_change_total, sediment_outflux, seepage_outlet_node, years)

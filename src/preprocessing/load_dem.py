@@ -3,6 +3,7 @@ import time
 import numpy as np
 import rasterio
 from rasterio.fill import fillnodata
+from rasterio.warp import reproject, Resampling  # Add this import
 from landlab import RasterModelGrid
 import matplotlib.pyplot as plt
 
@@ -13,31 +14,80 @@ DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
 RESULTS_DIR = os.path.join(BASE_DIR, 'results', 'figures')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-def load_dem(dem_path, mask_path=None):
-    """Load DEM data and optionally a watershed mask from .tif files."""
-    start_time = time.time()
+def load_dem(dem_path, mask_path=None, lake_mask_path=None):
+    """
+    Load a DEM, optionally a watershed mask, and optionally a lake mask.
+
+    Parameters:
+    -----------
+    dem_path : str
+        Path to the DEM file (e.g., TIFF).
+    mask_path : str, optional
+        Path to the watershed mask file (e.g., TIFF).
+    lake_mask_path : str, optional
+        Path to the lake mask file (e.g., TIFF).
+
+    Returns:
+    --------
+    elevation : ndarray
+        2D array of elevation values.
+    bounds : tuple
+        Bounding box of the DEM (left, bottom, right, top).
+    (dx, dy) : tuple
+        Cell size in x and y directions (in degrees or meters).
+    nodata : float
+        Nodata value of the DEM.
+    watershed_mask : ndarray
+        2D array of the watershed mask (1 for watershed, 0 elsewhere), or None if not provided.
+    lake_mask : ndarray
+        2D array of the lake mask (1 for lake, 0 elsewhere), or None if not provided.
+    """
+    # Load the DEM
     with rasterio.open(dem_path) as src:
-        elevation = src.read(1)
-        nodata = src.nodata
-        bounds = src.bounds
-        res = src.res
-        # Pre-fill depressions in the DEM
-        if nodata is not None:
-            mask = elevation != nodata
-            elevation_filled = fillnodata(elevation, mask=mask, max_search_distance=10)
-        else:
-            elevation_filled = elevation.copy()
-    # Load watershed mask if provided
-    if mask_path:
-        with rasterio.open(mask_path) as mask_src:
-            watershed_mask = mask_src.read(1)
-            # Ensure mask is binary (1 = inside watershed, 0 = outside)
-            watershed_mask = (watershed_mask == 1).astype(bool)
-    else:
-        watershed_mask = None
-    end_time = time.time()
-    print(f"Time to load DEM: {end_time - start_time:.2f} seconds")
-    return elevation_filled, bounds, res, nodata, watershed_mask
+        elevation = src.read(1)  # Read the first band
+        bounds = src.bounds  # (left, bottom, right, top)
+        dx, dy = src.res  # Cell size in x and y directions
+        nodata = src.nodatavals[0]  # Nodata value
+        transform = src.transform
+        dem_shape = elevation.shape
+
+    # Replace nodata with NaN
+    elevation = elevation.astype(np.float32)
+    elevation[elevation == nodata] = np.nan
+
+    # Load the watershed mask if provided
+    watershed_mask = None
+    if mask_path is not None:
+        with rasterio.open(mask_path) as src:
+            watershed_mask = src.read(1)
+            # Ensure the mask is binary (0 or 1)
+            watershed_mask = (watershed_mask > 0).astype(np.uint8)
+
+    # Load the lake mask if provided
+    lake_mask = None
+    if lake_mask_path is not None:
+        with rasterio.open(lake_mask_path) as src:
+            lake_mask = src.read(1)
+            # Check if the lake mask matches the DEM's dimensions
+            if lake_mask.shape != dem_shape:
+                print(f"Warning: Lake mask shape {lake_mask.shape} does not match DEM shape {dem_shape}. Resampling lake mask...")
+                # Create an empty array with the same shape as the DEM
+                lake_mask_resampled = np.zeros(dem_shape, dtype=np.uint8)
+                # Reproject the lake mask to match the DEM
+                reproject(
+                    source=lake_mask,
+                    destination=lake_mask_resampled,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=src.crs,
+                    resampling=Resampling.nearest  # Use nearest neighbor for binary data
+                )
+                lake_mask = lake_mask_resampled
+            # Ensure the mask is binary (0 or 1)
+            lake_mask = (lake_mask > 0).astype(np.uint8)
+
+    return elevation, bounds, (dx, dy), nodata, watershed_mask, lake_mask
 
 def create_landlab_grid(elevation, dx, dy, nodata, watershed_mask=None):
     """Create a Landlab grid from DEM data with two outlets (seepage and overflow)."""
@@ -79,7 +129,7 @@ def create_landlab_grid(elevation, dx, dy, nodata, watershed_mask=None):
         print(f"Seepage outlet identified at (row={seepage_row}, col={seepage_col})")
 
     # Set the overflow outlet near the dam crest (assuming it's close to the seepage outlet)
-    # For 1000m resolution, place it one node away from the seepage outlet
+    # For 500m resolution, place it one node away from the seepage outlet
     overflow_row, overflow_col = seepage_row, seepage_col + 1
     if overflow_col >= cols:
         overflow_row, overflow_col = seepage_row + 1, seepage_col
@@ -120,7 +170,7 @@ def plot_grid(grid:RasterModelGrid, field_to_plot:str, title:str="Model topograp
     print(f"Time to display DEM: {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
-    dem_path = os.path.join(DATA_DIR, 'sarez1000m.tif')
+    dem_path = os.path.join(DATA_DIR, 'sarez500m.tif')
     mask_path = os.path.join(DATA_DIR, 'sarez_watershed_mask.tif') if os.path.exists(
         os.path.join(DATA_DIR, 'sarez_watershed_mask.tif')) else None
     file_size = os.path.getsize(dem_path) / (1024 * 1024)
