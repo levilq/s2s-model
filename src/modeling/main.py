@@ -15,7 +15,7 @@ plt.switch_backend('TkAgg')
 def main():
     """Main function to run the Source-to-Sink model."""
 
-    path_to_topo = os.path.join(DATA_DIR, 'sarez1000m.tif')
+    path_to_topo = os.path.join(DATA_DIR, 'sarez500m.tif')
 
     mg = SourceToSinkSimulator(path_to_topography=path_to_topo)
     mg.setNoData(nodata_value=0)
