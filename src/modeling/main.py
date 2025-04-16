@@ -16,13 +16,14 @@ def main():
     """Main function to run the Source-to-Sink model."""
 
     path_to_topo = os.path.join(DATA_DIR, 'sarez1000m.tif')
+    path_to_precip = os.path.join(DATA_DIR, 'precip1000m.tif')
 
-    mg = SourceToSinkSimulator(path_to_topography=path_to_topo)
+    mg = SourceToSinkSimulator(path_to_topography=path_to_topo, path_to_precipitation=path_to_precip)
     mg.setNoData(nodata_value=0)
     mg.createRasterModelGrid()
     mg.setWatershedBoundaryConditions()
-    mg.setUpErosionDepositionModel(runoff_rate=2)
-    mg.runSimulation()
+    mg.setUpErosionDepositionModel()
+    mg.runSimulation(10)
     mg.visualizeResults()
 
 

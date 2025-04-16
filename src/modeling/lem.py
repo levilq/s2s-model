@@ -1,4 +1,7 @@
+import os
+
 from landlab import RasterModelGrid
+import numpy as np
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.fill import fillnodata
@@ -10,18 +13,22 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "utm"])
     import utm
 
-from landlab.components import FlowAccumulator, ErosionDeposition
+from landlab.components import FlowAccumulator, ErosionDeposition, SinkFiller
 
 
 from utils import resampleDEM 
 
 import matplotlib.pyplot as plt
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
+OUTPUT_DIR = os.path.join(BASE_DIR, 'data', 'out')
         
 
 class SourceToSinkSimulator:
-    def __init__(self, path_to_topography: str):
+    def __init__(self, path_to_topography: str, path_to_precipitation: str = None):
         self.path_to_topography = path_to_topography
+        self.path_to_precipitation = path_to_precipitation
         self.grid = None
         self.nodata_mask = None
         self.valid_data_mask = None
@@ -29,6 +36,7 @@ class SourceToSinkSimulator:
         self.flow_accumulator = None
         self.erosion_deposition_model = None
         self.model_resolution = None
+        self.model_run_time = None
 
     def createRasterModelGrid(self):
         """Create a RasterModelGrid from a DEM file."""
@@ -39,7 +47,7 @@ class SourceToSinkSimulator:
                 self.reprojectToUtm(src, dst_path)
                 src = rasterio.open(dst_path)
                 print(f"Reprojected raster to UTM and saved as {dst_path}.")
-            elevation = src.read(1)
+            elevation = src.read(1).astype(np.float64)
             nodata = src.nodata
             if not nodata:
                 if self.no_data_value is not None:
@@ -49,11 +57,12 @@ class SourceToSinkSimulator:
                     print("Use SourceToSinkSimulator.setNoData() to set the nodata value.")
             self.nodata_mask = elevation == nodata
             self.valid_data_mask = ~self.nodata_mask
-            elevation_filled = fillnodata(elevation, mask=self.nodata_mask, max_search_distance=10)
-            self.grid = RasterModelGrid(elevation_filled.shape, xy_spacing=(src.res[0], src.res[1]))
-            self.grid.add_field('topographic__elevation', elevation_filled, at='node')
-           
             self.model_resolution = src.res[0]  # Assuming square pixels
+            self.grid = RasterModelGrid(elevation.shape, xy_spacing=(src.res[0], src.res[1]))
+            self.grid.add_field('topographic__elevation', elevation, at='node')
+            self.setPrecipitationRates(self.path_to_precipitation)
+           
+            
 
     def reprojectToUtm(self, src, dst_path):
         """Reprojects a raster to UTM project coordinate system."""
@@ -99,14 +108,19 @@ class SourceToSinkSimulator:
         if self.grid is not None:
             self.grid.set_nodata_nodes_to_closed(self.grid.at_node['topographic__elevation'], self.no_data_value)
             try:
-                self.grid.set_watershed_boundary_condition(self.grid.field_values('topographic__elevation'))
+                self.grid.set_watershed_boundary_condition(self.grid.field_values('topographic__elevation'), 
+                                                           nodata_value=self.no_data_value, 
+                                                           remove_disconnected=True,
+                                                           return_outlet_id=True
+                                                           )
+                self.saveDataArray(self.grid.status_at_node.reshape(self.grid.shape), title="Watershed Boundary Conditions")             
             except Exception as e:
                 print(f"Error setting watershed boundary conditions: {e}")
-                print("Seems like there are multiple cells with the lowest elevation.")
+                print("Seems like there are multiple cells with the lowest elevation.")  
                 print("Trying to lower the elevation of one of this cells, which will serve as the outlet node.")
                 min_elev = self.grid.at_node['topographic__elevation'].reshape(self.grid.shape)[self.valid_data_mask].min()
-                self.grid.field_values("topographic__elevation")[self.grid.at_node["topographic__elevation"]==min_elev][0] = min_elev - 1
-                self.grid.set_watershed_boundary_condition(self.grid.field_values("topographic__elevation"))
+                node_ids = np.where(self.grid.at_node['topographic__elevation']== min_elev)[0]
+                self.grid.set_watershed_boundary_condition_outlet_id(node_ids[0], self.grid.field_values("topographic__elevation"))
     
     def setPrecipitationRates(self, path_to_precipitation_raster:str):  
         """Set precipitation rates for the simulation."""
@@ -124,11 +138,12 @@ class SourceToSinkSimulator:
                                                             up_scale_factor=src.res[0]/self.model_resolution)
                 src = rasterio.open(path_to_precipitation_raster)
 
-            precipitation = src.read(1)
+            precipitation = src.read(1).astype(np.float64)
             nodata = src.nodata
             if nodata:
                 precipitation[self.nodata_mask] = nodata
-            self.grid.add_field('water__unit_flux_in', precipitation, at='node', clobber=True)
+            self.grid.add_field('water__unit_flux_in', precipitation, at='node', clobber=True, units='mm/year')
+            print(self.grid.field_values('water__unit_flux_in').dtype)
             #TODO: need to check the units. for now the units are in mm/year
     
     def setUpErosionDepositionModel(self, 
@@ -147,21 +162,27 @@ class SourceToSinkSimulator:
             raise ValueError("Precipitation rates not set. Call setPrecipitationRates() first or specify runoff_rate keyword argument.")
         
         self.flow_accumulator = FlowAccumulator(self.grid, depression_finder='DepressionFinderAndRouter', flow_director='D8', runoff_rate=runoff_rate)
-        self.erosion_deposition_model = ErosionDeposition(self.grid, K_sp=0.01, m_sp=1.0, n_sp=1.0, runoff_rate=runoff_rate)
+        self.sink_filler = SinkFiller(self.grid)
+        self.erosion_deposition_model = ErosionDeposition(self.grid, K=0.01, m_sp=1.0, n_sp=1.0)
 
     def runSimulation(self, years: int = 100, dt: float = 1, uplift_rate: float = 0.002):
         """Run the simulation for a specified number of years."""
         if self.flow_accumulator is None or self.erosion_deposition_model is None:
             raise ValueError("Erosion and deposition model not set up. Call setUpErosionDepositionModel() first.")
-        
+        self.model_run_time = years
         n_steps = int(years / dt)
         for i in range(n_steps):
             #accumulate flow a
             self.flow_accumulator.run_one_step()
+            #calculate sediment transport capacity
+            self.sink_filler.run_one_step()
             #calculate sediment erosion and deposition
             self.erosion_deposition_model.run_one_step(dt=dt)
             #apply uplift rate
-            self.grid.at_node['topographic__elevation'][self.valid_data_mask] += uplift_rate * dt
+            self.grid.at_node['topographic__elevation'].reshape(self.grid.shape)[self.valid_data_mask] += uplift_rate * dt
+            if i % (years/10) == 0:
+                print(f"Simulation step {i}/{n_steps} completed.")
+
 
     def visualizeResults(self):
         """Visualize the results of the simulation."""
@@ -169,13 +190,51 @@ class SourceToSinkSimulator:
             raise ValueError("Grid not created. Call createRasterModelGrid() first.")
         if self.nodata_mask is None:
             raise ValueError("No data mask not created. Call setNoData() first.")
-        sed_flux_diff = self.grid.at_node['sediment__influx'] - self.grid.at_node['sediment_outflux']
-        sed_flux_diff[self.nodata_mask] = 0
-        sed_flux_diff[self.grid.boundary_nodes] = 0
+        sediment_influx = self.grid.at_node['sediment__influx']*31536000 * self.model_run_time # Convert to total sediment influx in m3
+        sediment_influx[self.grid.boundary_nodes] = 0
         plt.figure(figsize=(10, 10))
-        plt.imshow(sed_flux_diff.reshape(self.grid.shape), cmap='terrain')
+        plt.imshow(sediment_influx.reshape(self.grid.shape), cmap='terrain')
         plt.colorbar(label='Sediment Flux Difference (m3/s)')
+        plt.savefig(os.path.join(OUTPUT_DIR, 'sediment_flux_difference.png'))
         plt.show()
+        
+
+    def plotFieldData(self, field_name: str):
+        """Plot the field data."""
+        if self.grid is None:
+            raise ValueError("Grid not created. Call createRasterModelGrid() first.")
+        if field_name not in self.grid.at_node:
+            raise ValueError(f"Field {field_name} not found in the grid.")
+        plt.figure(figsize=(10, 10))
+        plt.imshow(self.grid.at_node[field_name].reshape(self.grid.shape), cmap='terrain')
+        plt.colorbar(label=field_name)
+        plt.show()
+    
+    def plotDataArray(self, data_array: np.ndarray, title: str = None):
+        """Plot a data array."""
+        if self.grid is None:
+            raise ValueError("Grid not created. Call createRasterModelGrid() first.")
+        plt.figure(figsize=(10, 10))
+        plt.imshow(data_array.reshape(self.grid.shape), cmap='terrain')
+        plt.colorbar(label=title)
+        if title:
+            plt.title(title)
+        plt.show()
+    
+    def saveDataArray(self, data_array: np.ndarray, title: str = None, save_path: str = None):
+        """Plot and save a data array."""
+        if not title:
+            title = "output_result"
+        if not save_path:
+            save_path = os.path.join(OUTPUT_DIR, f'{title}.png')
+        if self.grid is None:
+            raise ValueError("Grid not created. Call createRasterModelGrid() first.")
+        plt.figure(figsize=(10, 10))
+        plt.imshow(data_array.reshape(self.grid.shape), cmap='terrain')
+        plt.colorbar(label=title)
+        plt.title(title)
+        plt.savefig(save_path)
+
 
 
 
