@@ -31,8 +31,8 @@ def setup_landlab_model(grid):
         grid,
         K=0.0001,  # Increased erodibility for mountainous terrain
         v_s=0.05,  # Settling velocity for fine sediment (silt)
-        F_f=0.5,   # 50% fine sediment, reflecting a mix of coarse and fine
-        m_sp=1.0,  # Discharge exponent
+        F_f=0,   # 50% fine sediment, reflecting a mix of coarse and fine
+        m_sp=0.5,  # Discharge exponent
         n_sp=1.0,  # Slope exponent
         solver='basic'
     )
@@ -93,8 +93,9 @@ def run_model(grid, fa, ed, seepage_outlet_node, overflow_outlet_node, lake_mask
         elevation_after = grid.at_node['topographic__elevation'].copy()
         elevation_change = elevation_after - elevation_before
 
-        # Update the elevation field
-        grid.at_node['topographic__elevation'][:] = elevation_before + elevation_change
+        #This does not make sense: 
+        """ # Update the elevation field
+        grid.at_node['topographic__elevation'][:] = elevation_before + elevation_change"""
 
         # Prevent elevation in the lake from decreasing below the initial elevation
         lake_nodes = (lake_mask_nodes == 1)
@@ -209,9 +210,9 @@ def plot_results(grid, dx, dy, initial_elevation, nodata_mask, lake_mask, elevat
     elevation_change[nodata_mask] = np.nan
 
     plt.figure(figsize=(10, 8))
-    plt.imshow(elevation_change, cmap='RdBu_r', vmin=-1.0, vmax=1.0)
+    plt.imshow(elevation_change, cmap='RdBu_r')
     plt.colorbar(label='Elevation Change (m)')
-    plt.title(f'Erosion (Red) and Deposition (Blue) After {years} Years ({int(dx * 111000)}m)')
+    plt.title(f'Elevation change after evolving the landscape for {years} Years ({int(dx * 111000)}m)')
     plt.xlabel('X (grid cells)')
     plt.ylabel('Y (grid cells)')
     plt.show()

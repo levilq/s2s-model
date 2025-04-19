@@ -15,16 +15,15 @@ plt.switch_backend('TkAgg')
 def main():
     """Main function to run the Source-to-Sink model."""
 
-    path_to_topo = os.path.join(DATA_DIR, 'sarez500m.tif')
+    path_to_topo = os.path.join(DATA_DIR, 'sarez500m_utm.tif')
+    path_to_precip = os.path.join(DATA_DIR, 'precip500m_utm.tif')
 
-    mg = SourceToSinkSimulator(path_to_topography=path_to_topo)
+    mg = SourceToSinkSimulator(path_to_topography=path_to_topo, path_to_precipitation=path_to_precip)
     mg.setNoData(nodata_value=0)
     mg.createRasterModelGrid()
     mg.setWatershedBoundaryConditions()
-    mg.setUpErosionDepositionModel(runoff_rate=2)
-    mg.runSimulation()
-    mg.visualizeResults()
-
+    mg.setUpErosionDepositionModel()
+    mg.runSimulation(50) # 50 years. Change it to 1000 years for a long run.
 
 if __name__ == "__main__":
     main()
