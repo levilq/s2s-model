@@ -77,3 +77,30 @@ if __name__ == "__main__":
 
     resampled_dem_path = resampleDEM(dem_path, up_scale_factor, target_resolution)
     print(f"Resampled DEM saved at: {resampled_dem_path}")
+
+
+
+
+class ProcessLogger:
+    """
+    A simple logger class to log messages to a file.
+    
+    Attributes:
+    log_file (str): Path to the log file.
+    """
+    
+    def __init__(self, log_file):
+        self.log_file = log_file
+        with open(self.log_file, 'w') as f:
+            f.write("Process Log\n")
+            f.write("="*40 + "\n")
+            f.write("Timestamp\tMessage\n")
+            f.write("="*40 + "\n")
+
+    
+    def log(self, message):
+        """ Log a message to the log file."""
+        with open(self.log_file, 'a') as f:
+            f.write(f"{np.datetime64('now')}\t{message}\n")
+
+       
