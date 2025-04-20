@@ -22,7 +22,7 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Ignore large data files
-
+data/out/
 data/GPCP_3.2/
 
 
