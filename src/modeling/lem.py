@@ -24,6 +24,18 @@ import matplotlib.pyplot as plt
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'data', 'out')
+GRID_OUTPUT_DIR = os.path.join(OUTPUT_DIR, 'grid')
+DF_OUTPUT_DIR = os.path.join(OUTPUT_DIR, 'df')
+
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
+if not os.path.exists(GRID_OUTPUT_DIR):
+    os.makedirs(GRID_OUTPUT_DIR)
+if not os.path.exists(DF_OUTPUT_DIR):
+    os.makedirs(DF_OUTPUT_DIR)
+
 
 
 class SourceToSinkSimulator:
@@ -35,6 +47,7 @@ class SourceToSinkSimulator:
         self.valid_data_mask = None
         self.no_data_value = None
         self.flow_accumulator = None
+        self.depression_finder = None
         self.erosion_deposition_model = None
         self.model_resolution = None
         self.model_runtime = None
@@ -271,6 +284,11 @@ class SourceToSinkSimulator:
             raise ValueError("Grid not created. Call createRasterModelGrid() first.")
         plt.figure(figsize=(10, 10))
         data_2d = data_array.reshape(self.grid.shape) if data_array.ndim == 1 else data_array
+        
+        if not "Watershed area" in title:
+            if data_array.dtype == np.int32:
+                data_2d = data_2d.astype(np.float64)
+            data_2d[self.nodata_mask] = np.nan
         plt.imshow(data_2d, cmap=cmap)
         plt.colorbar(label=label)
         if title:
@@ -279,7 +297,6 @@ class SourceToSinkSimulator:
         plt.ylabel('Y (grid cells)')
         if save_path:
             plt.savefig(save_path)
-            self.logger.log(f"Plot saved to {save_path}")
         if self.runtime_plotting:
             plt.show()
         plt.close()
@@ -362,6 +379,8 @@ class SourceToSinkSimulator:
 
         self.flow_accumulator = FlowAccumulator(self.grid, depression_finder='DepressionFinderAndRouter',
                                                 flow_director='D8', runoff_rate=runoff_rate)
+        self.depression_finder = self.flow_accumulator.depression_finder
+        self.depression_finder.initialize_optional_output_fields()
         self.sink_filler = SinkFiller(self.grid)
         self.erosion_deposition_model = ErosionDeposition(self.grid, K=K_sp, m_sp=m_sp, n_sp=n_sp, F_f=F_f,
                                                           solver=solver)
@@ -382,49 +401,67 @@ class SourceToSinkSimulator:
             self.erosion_deposition_model.run_one_step(dt=dt)
             self.grid.at_node['topographic__elevation'].reshape(self.grid.shape)[
                 self.valid_data_mask] += uplift_rate * dt
-            if i % (years / 10) == 0:
-                print(f"Fields: {self.grid.fields()}")
+            if i % (years / 10) == 0 or i == n_steps - 1:
                 self.logger.log("+-" * 50)
-                self.logger.log(f"Simulation step {i}/{n_steps} completed.")
-                print(f"Simulation step {i}/{n_steps} completed.")
+                self.logger.log(f"Simulation step {i+1}/{n_steps} completed.")
+                print(f"Simulation step {i+1}/{n_steps} completed.")
 
-                fields = ['topographic__elevation', 'water__unit_flux_in', 'drainage_area',
-                          'surface_water__discharge', 'water_depth', 'sediment__influx',
-                          'sediment__outflux', 'sediment_deposit__thickness', 'flow__sink_flag']
-                for field in fields:
+                #plot all the fields in the grid. Th final results will be plotted after last step. 
+                grid_fields = [i.split(":")[1] for i in self.grid.fields()]
+                print(f"Grid fields: {grid_fields}")
+                for field in grid_fields:
                     if field in self.grid.at_node:
                         self.logFieldStats(field)
-                        self.plotAndSaveFieldData(field, save_path=os.path.join(OUTPUT_DIR, f'{field}_step_{i}.png'))
-                self.plotAndSaveDataArray(self.grid.at_node['topographic__elevation'] - self.initial_topography,
-                                          title=f"Topography Change Step {i}",
-                                          save_path=os.path.join(OUTPUT_DIR, f'topography_change_step_{i}.png'))
+                        self.plotAndSaveFieldData(field, save_path=os.path.join(GRID_OUTPUT_DIR, f'{field}_step_{i+1}.png'))
 
+                # Plot flood status of the nodes
+                flood_status = self.depression_finder.flood_status.reshape(self.grid.shape)
+                self.plotAndSaveDataArray(flood_status,
+                                          title=f"Flood Status Step {i+1}",
+                                          cmap='RdBu',
+                                          label='Flood Status',
+                                          save_path=os.path.join(DF_OUTPUT_DIR, f'flood_status_step_{i+1}.png'))
+
+                # Plot lake map
+                lake_map = self.depression_finder.lake_map.reshape(self.grid.shape)
+                self.plotAndSaveDataArray(lake_map,
+                                          title=f"Lake Map Step {i+1}",
+                                          cmap='RdBu',
+                                          label='Lake Map',
+                                          save_path=os.path.join(DF_OUTPUT_DIR, f'lake_map_step_{i+1}.png'))
+                
+                #Plot depression depths
+                depression_depth = self.depression_finder.depression_depth.reshape(self.grid.shape)
+                self.plotAndSaveDataArray(depression_depth,
+                                          title=f"Depression Depth Step {i+1}",
+                                          cmap='RdBu',
+                                          label='Depression Depth (m)',
+                                          save_path=os.path.join(DF_OUTPUT_DIR, f'depression_depth_step_{i+1}.png'))
+                
+                #Plot depression outlet map
+                depression_outlet_map = self.depression_finder.depression_outlet_map.reshape(self.grid.shape)
+                self.plotAndSaveDataArray(depression_outlet_map,
+                                            title=f"Depression Outlet Map Step {i+1}",
+                                            cmap='RdBu',
+                                            label='Depression Outlet Map',
+                                            save_path=os.path.join(DF_OUTPUT_DIR, f'depression_outlet_map_step_{i+1}.png'))
+                
+                elevation_diff = self.grid.at_node['topographic__elevation'] - self.initial_topography
+                self.plotAndSaveDataArray(elevation_diff,
+                                          title=f"Topography Change Step {i+1}",
+                                          cmap='RdBu',
+                                          label='Elevation Change (m)',
+                                          save_path=os.path.join(OUTPUT_DIR, f'topography_change_step_{i+1}.png'))
+        
         elevation_diff = self.grid.at_node['topographic__elevation'] - self.initial_topography
-        self.plotAndSaveDataArray(elevation_diff,
-                                  title="Elevation Difference (Whole Watershed)",
-                                  save_path=os.path.join(OUTPUT_DIR, 'elevation_difference_watershed.png'),
-                                  cmap='RdBu',
-                                  label='Elevation Change (m)')
-
         if self.lake_mask is not None and self.lake_mask.sum() > 0:
-            elevation_diff_lake = elevation_diff.copy()
-            elevation_diff_lake_2d = elevation_diff_lake.reshape(self.grid.shape)
+            elevation_diff_lake_2d = elevation_diff.reshape(self.grid.shape)
             elevation_diff_lake_2d[self.lake_mask != 1] = np.nan
-            self.plotAndSaveDataArray(elevation_diff_lake,
-                                      title="Elevation Difference (Lake Only)",
-                                      save_path=os.path.join(OUTPUT_DIR, 'elevation_difference_lake.png'),
-                                      cmap='RdBu',
-                                      label='Elevation Change (m)')
-
-        self.logger.log("Available fields in the grid after simulation:")
-        fields_dict = self.grid.fields()
-        self.logger.log(str(fields_dict))
-
-        if 'node' in fields_dict:
-            for field in fields_dict['node']:
-                self.logger.log(f"Plotting field: {field}")
-                self.plotAndSaveFieldData(field,
-                                          save_path=os.path.join(OUTPUT_DIR, f'final_{field}.png'))
+            self.plotAndSaveDataArray(elevation_diff_lake_2d,
+                                    title="Elevation Difference (Lake Only)",
+                                    save_path=os.path.join(OUTPUT_DIR, 'elevation_difference_lake.png'),
+                                    cmap='RdBu',
+                                    label='Elevation Change (m)')
 
     def plotFieldData(self, field_name: str):
         """Plot the field data."""
@@ -454,10 +491,17 @@ class SourceToSinkSimulator:
             raise ValueError(f"Field {field_name} not found in the grid.")
         if not save_path:
             save_path = os.path.join(OUTPUT_DIR, f'{field_name}.png')
+        
+        if field_name == 'topographic__elevation':
+            cmap = 'terrain'
+        else:
+            cmap = 'RdBu'
         plt.figure(figsize=(10, 10))
         data_2d = self.grid.at_node[field_name].reshape(self.grid.shape)
+        if self.grid.at_node[field_name].dtype == np.int32:
+            data_2d = data_2d.astype(np.float64)
         data_2d[self.nodata_mask] = np.nan
-        plt.imshow(data_2d, cmap='terrain')
+        plt.imshow(data_2d, cmap=cmap)
         plt.colorbar(label=field_name)
         plt.title(field_name)
         plt.xlabel('X (grid cells)')
