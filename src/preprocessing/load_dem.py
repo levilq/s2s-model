@@ -170,7 +170,7 @@ def plot_grid(grid:RasterModelGrid, field_to_plot:str, title:str="Model topograp
     print(f"Time to display DEM: {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
-    dem_path = os.path.join(DATA_DIR, 'sarez500m.tif')
+    dem_path = os.path.join(DATA_DIR, 'sarez500m_utm.tif')
     mask_path = os.path.join(DATA_DIR, 'sarez_watershed_mask.tif') if os.path.exists(
         os.path.join(DATA_DIR, 'sarez_watershed_mask.tif')) else None
     file_size = os.path.getsize(dem_path) / (1024 * 1024)
