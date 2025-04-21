@@ -1,4 +1,5 @@
 import os
+import warnings
 
 from landlab import RasterModelGrid
 import numpy as np
@@ -39,98 +40,128 @@ if not os.path.exists(DF_OUTPUT_DIR):
 
 
 class SourceToSinkSimulator:
-    def __init__(self, path_to_topography: str, path_to_precipitation: str = None, runtime_plotting: bool = False):
+    def __init__(self, path_to_topography: str, path_to_precipitation: str = None, path_to_watershed_mask:str=None, path_to_sink_mask:str=None, runtime_plotting: bool = False):
         self.path_to_topography = path_to_topography
         self.path_to_precipitation = path_to_precipitation
+        self.path_to_watershed_mask = path_to_watershed_mask
+        self.path_to_sink_mask = path_to_sink_mask
         self.grid = None
         self.nodata_mask = None
         self.valid_data_mask = None
         self.no_data_value = None
+        self.shape = None
+        self.model_x_spacing = None
+        self.model_y_spacing = None
         self.flow_accumulator = None
         self.depression_finder = None
         self.erosion_deposition_model = None
-        self.model_resolution = None
+
         self.model_runtime = None
         self.initial_topography = None
-        self.shape = None
+
         self.runtime_plotting = runtime_plotting
         self.save_step_results = True
-        self.lake_mask = None
         self.outlet_id = None
         self.logger = ProcessLogger(os.path.join(OUTPUT_DIR, 'process.log'))
         self.logger.log("SourceToSinkSimulator initialized.")
 
-    def loadLakeMask(self, lake_mask_path: str):
-        """Load a lake mask to identify lake areas."""
+    def loadRaster(self, raster_path: str, is_mask: bool = False, is_dem: bool = False):
+        """Load a raster file."""
         try:
-            with rasterio.open(lake_mask_path) as src:
+            with rasterio.open(raster_path) as src:
                 if src.crs.is_geographic:
-                    dst_path = lake_mask_path.replace('.tif', '_utm.tif')
+                    dst_path = raster_path.replace('.tif', '_utm.tif')
                     self.reprojectToUtm(src, dst_path)
                     src = rasterio.open(dst_path)
-                    print(f"Reprojected lake mask to UTM and saved as {dst_path}.")
-                    lake_mask_path = dst_path
-                if src.res[0] != self.model_resolution or src.shape != self.grid.shape:
-                    print("Warning: Lake mask resolution does not match DEM resolution. Resampling...")
-                    lake_mask_path = resampleDEM(lake_mask_path, up_scale_factor=src.res[0] / self.model_resolution)
-                    src = rasterio.open(lake_mask_path)
-                self.lake_mask = src.read(1).astype(np.int32)
-                self.lake_mask[self.nodata_mask] = 0
-                self.logger.log(f"Lake mask loaded from {lake_mask_path}.")
-                self.logger.log(
-                    f"Lake mask stats: Shape: {self.lake_mask.shape}, Min: {self.lake_mask.min()}, Max: {self.lake_mask.max()}, Sum: {self.lake_mask.sum()}")
+                    print(f"Reprojected raster to UTM and saved as {dst_path}.")
+                if  self.grid and src.shape != self.grid.shape:
+                    print(f"grid shape: {self.grid.shape}, raster shape: {src.shape}")
+                    print(f"Warning: The resolution of the {raster_path} raster does not match the DEM resolution.")
+                    print("Resampling the raster to match the DEM resolution.")
+                    path_to_raster = resampleDEM(raster_path,
+                                                            up_scale_factor=src.res[0] / self.model_resolution)
+                    src = rasterio.open(path_to_raster)
+
+                if  is_mask:
+                    data = src.read(1).astype(np.int32)
+                else:
+                    data = src.read(1).astype(np.float64)
+                
+                if is_dem:
+                    self.model_x_spacing = src.res[0]
+                    self.model_y_spacing = src.res[1]
         except Exception as e:
-            print(f"Error loading lake mask: {e}")
-            print("Proceeding without a lake mask. Outlet placement may need manual adjustment.")
-            self.lake_mask = None
+            print(f"Error loading raster: {e}")
+            return None
+
+        return data
+
+
 
     def createRasterModelGrid(self):
         """Create a RasterModelGrid from a DEM file."""
-        with rasterio.open(self.path_to_topography) as src:
-            if src.crs.is_geographic:
-                dst_path = self.path_to_topography.replace('.tif', '_utm.tif')
-                self.reprojectToUtm(src, dst_path)
-                src = rasterio.open(dst_path)
-                print(f"Reprojected raster to UTM and saved as {dst_path}.")
-            elevation = src.read(1).astype(np.float64)
-            nodata = src.nodata
-            if not nodata:
-                if self.no_data_value is not None:
-                    nodata = self.no_data_value
-                else:
-                    print("No nodata value is not found in the raster. Set it before creating the grid.")
-                    print("Use SourceToSinkSimulator.setNoData() to set the nodata value.")
-            self.nodata_mask = elevation == nodata
 
-            self.valid_data_mask = ~self.nodata_mask
-            self.model_resolution = src.res[0]
-            self.grid = RasterModelGrid(elevation.shape, xy_spacing=(src.res[0], src.res[1]))
-            self.grid.add_field('topographic__elevation', elevation, at='node', units='m')
+        # Load the DEM raster
+        elevation_data = self.loadRaster(self.path_to_topography, is_dem=True)
+        if elevation_data is None:
+            raise ValueError("Elevation data not found or invalid. Please check the path.")
+        self.shape = elevation_data.shape
 
-            self.logger.log("RasterModelGrid created successfully.")
-            self.logger.log(f"Model resolution: {self.model_resolution} m")
-            self.logger.log(f"Model grid shape: {self.grid.shape}")
-            self.logger.log(f"Model grid size: {self.grid.number_of_nodes} nodes")
-            self.logger.log(f"Model grid area: {self.grid.dx} m x {self.grid.dy} m")
-            self.logger.log(f"Model grid area: {self.grid.dx * self.grid.dy} m2")
-            self.logger.log(f"Model grid extent: {self.grid.extent}")
-            self.logFieldStats('topographic__elevation')
+        # Mask out pixels outside the watershed area
+        if self.path_to_watershed_mask:
+            watershed_mask = self.loadRaster(self.path_to_watershed_mask, is_mask=True)
+            if watershed_mask is not None:
+                elevation_data[watershed_mask == 0] = self.no_data_value
+                self.valid_data_mask = watershed_mask
+                self.nodata_mask = elevation_data == self.no_data_value
+                self.logger.log(f"Watershed mask loaded from {self.path_to_watershed_mask}.")
+            else: 
+                raise ValueError("Watershed mask not found or invalid. Please check the path.")
+        else:
+            raise ValueError("Watershed mask not provided. Please provide a valid watershed mask.")    
 
-            if self.path_to_precipitation:
-                self.setPrecipitationRates(self.path_to_precipitation)
+        # Create a raster model grid
+        self.grid = RasterModelGrid(elevation_data.shape, xy_spacing=(self.model_x_spacing, self.model_y_spacing))
+        self.grid.add_field('topographic__elevation', elevation_data, at='node', units='m')
 
-            self.initial_topography = self.grid.at_node['topographic__elevation'].copy()
+        # Add the watershed mask as a field in the grid
+        self.grid.add_field('watershed_mask', self.valid_data_mask, at='node', units='binary')
 
-            lake_mask_path = os.path.join(DATA_DIR, 'sarez_lake_mask_500m_utm.tif')
-            if os.path.exists(lake_mask_path):
-                self.loadLakeMask(lake_mask_path)
+        self.logger.log("RasterModelGrid created successfully.")
+        self.logger.log(f"Model resolution (x,y): {self.model_x_spacing, self.model_y_spacing} m")
+        self.logger.log(f"Model grid shape: {self.grid.shape}")
+        self.logger.log(f"Model grid size: {self.grid.number_of_nodes} nodes")
+        self.logger.log(f"Model grid cell size: {self.grid.dx} m x {self.grid.dy} m")
+        self.logger.log(f"Model grid cell area: {self.grid.dx * self.grid.dy} m2")
+        self.logger.log(f"Model grid extent: {self.grid.extent}")
+        self.logFieldStats('topographic__elevation')
+
+        if self.path_to_precipitation:
+            precipitation_data = self.loadRaster(self.path_to_precipitation)
+            if precipitation_data is not None:
+                # Convert precipitation from mm/year to m/year
+                precipitation = precipitation_data / 1000.0
+                precipitation[self.nodata_mask] = self.no_data_value    
+                # Add precipitation as a field in the grid
+                self.grid.add_field('water__unit_flux_in', precipitation, at='node', clobber=True, units='m/year')
+                self.logger.log(f"Precipitation rates set from {self.path_to_precipitation}.")
+                self.logFieldStats('water__unit_flux_in')
             else:
-                print(
-                    "Lake mask file not found at data/raw/sarez_lake_mask_500m_utm.tif. Proceeding without lake mask.")
+                warnings.warn("Precipitation data not found or invalid. Proceeding without it. to accumulate flow rainfall rate of 2m/year is used.")
 
-            if self.runtime_plotting:
-                self.plotFieldData('topographic__elevation')
-                self.plotDataArray(self.nodata_mask, title="NoData Mask")
+        self.initial_topography = self.grid.at_node['topographic__elevation'].copy()
+
+        if self.path_to_sink_mask:
+            lake_mask = self.loadRaster(self.path_to_sink_mask, is_mask=True)
+            if lake_mask is not None:
+                self.grid.add_field('sink_mask', lake_mask, at='node', units='binary')
+                self.logger.log(f"Sink mask loaded from {self.path_to_sink_mask}.")
+        else:
+            warnings.warn("No sink mask provided. Proceeding without it. Some plots may not be available.")
+
+        if self.runtime_plotting:
+            self.plotFieldData('topographic__elevation')
+            self.plotDataArray(self.nodata_mask, title="NoData Mask")
 
     def reprojectToUtm(self, src, dst_path):
         """Reprojects a raster to UTM project coordinate system."""
@@ -170,9 +201,12 @@ class SourceToSinkSimulator:
         """Set watershed boundary conditions for the DEM."""
 
         def log(outlet_id):
-            self.outlet_id = outlet_id
             rows, cols = self.grid.shape
-            outlet_row, outlet_col = divmod(outlet_id, cols)
+            outlet_row, outlet_col = self.grid.node_x[self.outlet_id], self.grid.node_y[self.outlet_id]
+            self.logger.log(f"Outlet node ID: {self.outlet_id}")
+            self.logger.log(f"Outlet grid position: (row={outlet_row}, col={outlet_col})")
+            print(f"Outlet node ID: {self.outlet_id}")
+            print(f"Outlet grid position: (row={outlet_row}, col={outlet_col})")
 
             # Compute min and max elevations in the watershed (core nodes only)
             elevation = self.grid.at_node['topographic__elevation']
@@ -206,6 +240,8 @@ class SourceToSinkSimulator:
 
         if self.grid is None:
             raise ValueError("Grid not created. Call createRasterModelGrid() first.")
+        
+        self.logger.log("Setting watershed boundary conditions...")
 
         self.grid.set_nodata_nodes_to_closed(self.grid.at_node['topographic__elevation'], self.no_data_value)
         try:
@@ -215,29 +251,34 @@ class SourceToSinkSimulator:
                 remove_disconnected=True,
                 return_outlet_id=True
             )
+            self.outlet_id = outlet_id
             log(outlet_id=outlet_id)
         except Exception as e:
             print(f"Error setting watershed boundary conditions: {e}")
             print("Seems like there are multiple cells with the lowest elevation.")
-            print("Trying to lower the elevation of one of these cells to serve as the outlet node.")
-            min_elev = np.min(self.grid.at_node['topographic__elevation'][self.grid.core_nodes])
-            node_ids = np.where(self.grid.at_node['topographic__elevation'] == min_elev)[0]
+            print("Trying to select one of the them as the outlet.")
+            # Find the minimum elevation in the core nodes
+            # and set the outlet to that node
+            # This is a fallback in case the above method fails
+            # due to multiple minimum elevations
+            # or other issues.
+            # Find the minimum elevation in the core nodes
+            min_elev = np.min(self.grid.at_node['topographic__elevation'][not np.isnan(self.grid.at_node['topographic__elevation'])])
+            node_id = np.where(self.grid.at_node['topographic__elevation'] == min_elev)[0]
+            print(f"Setting outlet to node {node_id} with elevation {min_elev} m")
             outlet_id = self.grid.set_watershed_boundary_condition_outlet_id(
-                node_ids[0], self.grid.field_values("topographic__elevation")
+                node_id, self.grid.field_values("topographic__elevation")
             )
+            self.outlet_id = outlet_id
             log(outlet_id=outlet_id)
+        
+        if not outlet_id is None:
+            
+            self.logger.log("Watershed boundary conditions set successfully.")
 
         self.plotOutletOnTopography(save_path=os.path.join(OUTPUT_DIR, 'outlet_location.png'))
         self.plotDataArray(self.valid_data_mask, title="Watershed Area (Valid Data Mask)",
                            save_path=os.path.join(OUTPUT_DIR, 'watershed_area.png'))
-
-        if self.lake_mask is not None and self.lake_mask.sum() > 0:
-            rows, cols = self.grid.shape
-            outlet_row, outlet_col = divmod(self.outlet_id, cols)
-            if self.lake_mask[outlet_row, outlet_col] == 1:
-                print("WARNING: Outlet is located within the lake. Adjusting to a node on the dam...")
-                self.adjustOutletToDam()
-                self.plotOutletOnTopography(save_path=os.path.join(OUTPUT_DIR, 'outlet_location_adjusted.png'))
 
     def plotOutletOnTopography(self, save_path: str = None):
         """Plot the outlet on the topographic elevation map with lake mask overlay."""
@@ -246,6 +287,8 @@ class SourceToSinkSimulator:
         if self.outlet_id is None:
             raise ValueError("Outlet not set. Call setWatershedBoundaryConditions() first.")
 
+        outlet_x, outlet_y = self.grid.node_x[self.outlet_id], self.grid.node_y[self.outlet_id]
+        print(f"Outlet coordinates: ({outlet_x}, {outlet_y})")
         rows, cols = self.grid.shape
         outlet_row, outlet_col = divmod(self.outlet_id, cols)
         self.logger.log(
@@ -257,20 +300,13 @@ class SourceToSinkSimulator:
         plt.imshow(topo, cmap='terrain')
         plt.colorbar(label='Elevation (m)')
 
-        if self.lake_mask is not None and self.lake_mask.sum() > 0:
-            lake_contour = plt.contour(self.lake_mask, levels=[0.5], colors='blue', linestyles='--', linewidths=2)
+        if self.grid.has_field('sink_mask'):
+            lake_contour = plt.contour(self.grid.at_node["sink_mask"].reshape(self.grid.shape), levels=[0.5], colors='blue', linestyles='--', linewidths=2)
 
         outlet_point = plt.scatter(outlet_col, outlet_row, color='red', s=100, marker='x')
         plt.title('Outlet Location on Topography')
         plt.xlabel('X (grid cells)')
         plt.ylabel('Y (grid cells)')
-
-        legend_elements = [
-            plt.Line2D([0], [0], color='red', marker='x', linestyle='None', markersize=10, label='Outlet')]
-        if self.lake_mask is not None and self.lake_mask.sum() > 0:
-            legend_elements.append(
-                plt.Line2D([0], [0], color='blue', linestyle='--', linewidth=2, label='Lake Boundary'))
-        plt.legend(handles=legend_elements)
 
         if save_path:
             plt.savefig(save_path)
@@ -303,8 +339,10 @@ class SourceToSinkSimulator:
 
     def adjustOutletToDam(self):
         """Adjust the outlet to a node on the dam if it's in the lake."""
-        if self.lake_mask is None or self.lake_mask.sum() == 0:
+        if not self.grid or not self.grid.has_field('sink_mask'):
             raise ValueError("Cannot adjust outlet: Lake mask is not loaded or invalid.")
+        
+        lake_mask = self.grid.at_node['sink_mask'].reshape(self.grid.shape)
 
         rows, cols = self.grid.shape
         valid_data_2d = self.valid_data_mask.reshape(self.grid.shape)
@@ -313,11 +351,11 @@ class SourceToSinkSimulator:
         for r in range(1, rows - 1):
             for c in range(1, cols - 1):
                 node = r * cols + c
-                if self.lake_mask[r, c] == 0 and valid_data_2d[r, c]:
+                if lake_mask[r, c] == 0 and valid_data_2d[r, c]:
                     neighbors = [
                         (r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)
                     ]
-                    if any(self.lake_mask[nr, nc] == 1 for nr, nc in neighbors if 0 <= nr < rows and 0 <= nc < cols):
+                    if any(lake_mask[nr, nc] == 1 for nr, nc in neighbors if 0 <= nr < rows and 0 <= nc < cols):
                         boundary_nodes.append((node, r, c))
 
         if not boundary_nodes:
@@ -338,29 +376,6 @@ class SourceToSinkSimulator:
         self.logger.log(
             f"New outlet spatial coordinates: ({self.grid.node_x[self.outlet_id]}, {self.grid.node_y[self.outlet_id]})")
         self.logger.log(f"New outlet elevation: {self.grid.at_node['topographic__elevation'][self.outlet_id]}")
-
-    def setPrecipitationRates(self, path_to_precipitation_raster: str):
-        """Set precipitation rates for the simulation."""
-        with rasterio.open(path_to_precipitation_raster) as src:
-            if src.crs.is_geographic:
-                dst_path = path_to_precipitation_raster.replace('.tif', '_utm.tif')
-                self.reprojectToUtm(src, dst_path)
-                src = rasterio.open(dst_path)
-                print(f"Reprojected raster to UTM and saved as {dst_path}.")
-                path_to_precipitation_raster = dst_path
-            if src.res[0] != self.model_resolution and src.shape != self.grid.shape:
-                print("Warning: The resolution of the precipitation raster does not match the DEM resolution.")
-                print("Resampling the precipitation raster to match the DEM resolution.")
-                path_to_precipitation_raster = resampleDEM(path_to_precipitation_raster,
-                                                           up_scale_factor=src.res[0] / self.model_resolution)
-                src = rasterio.open(path_to_precipitation_raster)
-            precipitation = src.read(1).astype(np.float64) / 1000
-            nodata = src.nodata
-            if nodata:
-                precipitation[self.nodata_mask] = nodata
-            self.grid.add_field('water__unit_flux_in', precipitation, at='node', clobber=True, units='m/year')
-            self.logger.log(f"Precipitation rates set from {path_to_precipitation_raster}.")
-            self.logFieldStats('water__unit_flux_in')
 
     def setUpErosionDepositionModel(self,
                                     m_sp: float = 0.45,
@@ -393,14 +408,18 @@ class SourceToSinkSimulator:
         """Run the simulation for a specified number of years."""
         if self.flow_accumulator is None or self.erosion_deposition_model is None:
             raise ValueError("Erosion and deposition model not set up. Call setUpErosionDepositionModel() first.")
+        
+        self.logger.log(f"Running simulation for {years} years with dt={dt} seconds.")
         self.model_runtime = years
         n_steps = int(years / dt)
         for i in range(n_steps):
+            print(f"Running simulation step {i+1}/{n_steps}...")
             self.flow_accumulator.run_one_step()
-            self.sink_filler.run_one_step()
+            #self.sink_filler.run_one_step()
             self.erosion_deposition_model.run_one_step(dt=dt)
             self.grid.at_node['topographic__elevation'].reshape(self.grid.shape)[
                 self.valid_data_mask] += uplift_rate * dt
+            print(f"Step {i+1}/{n_steps} completed.")
             if i % (years / 10) == 0 or i == n_steps - 1:
                 self.logger.log("+-" * 50)
                 self.logger.log(f"Simulation step {i+1}/{n_steps} completed.")
@@ -454,10 +473,9 @@ class SourceToSinkSimulator:
                                           save_path=os.path.join(OUTPUT_DIR, f'topography_change_step_{i+1}.png'))
         
         elevation_diff = self.grid.at_node['topographic__elevation'] - self.initial_topography
-        if self.lake_mask is not None and self.lake_mask.sum() > 0:
-            elevation_diff_lake_2d = elevation_diff.reshape(self.grid.shape)
-            elevation_diff_lake_2d[self.lake_mask != 1] = np.nan
-            self.plotAndSaveDataArray(elevation_diff_lake_2d,
+        if self.grid.has_field('sink_mask'):
+            elevation_diff[self.grid.at_node['sink_mask'] == 0] = np.nan
+            self.plotAndSaveDataArray(elevation_diff.reshape(self.grid.shape),
                                     title="Elevation Difference (Lake Only)",
                                     save_path=os.path.join(OUTPUT_DIR, 'elevation_difference_lake.png'),
                                     cmap='RdBu',
