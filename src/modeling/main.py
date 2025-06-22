@@ -28,7 +28,7 @@ def main():
     mg.createRasterModelGrid()
     mg.setWatershedBoundaryConditions()
     mg.setUpErosionDepositionModel()
-    mg.runSimulation(50) # 50 years. Change it to 1000 years for a long run.
+    mg.runSimulation(1000) # 50 years. Change it to 1000 years for a long run.
 
 if __name__ == "__main__":
     main()
